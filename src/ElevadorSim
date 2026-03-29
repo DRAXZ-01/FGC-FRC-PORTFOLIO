@@ -1,0 +1,100 @@
+package src.elevadorsim;
+
+import com.revrobotics.spark.SparkLowLevel.MotorType;
+import com.revrobotics.spark.SparkMax;
+import com.revrobotics.spark.SparkBase.PersistMode;
+import com.revrobotics.spark.SparkBase.ResetMode;
+import com.revrobotics.spark.config.SparkMaxConfig;
+import com.revrobotics.spark.config.SparkBaseConfig.IdleMode;
+
+import edu.wpi.first.math.system.plant.DCMotor;
+import edu.wpi.first.wpilibj.RobotController;
+import edu.wpi.first.wpilibj.simulation.ElevatorSim;
+import edu.wpi.first.wpilibj.smartdashboard.Mechanism2d;
+import edu.wpi.first.wpilibj.smartdashboard.MechanismLigament2d;
+import edu.wpi.first.wpilibj.smartdashboard.MechanismRoot2d;
+import edu.wpi.first.wpilibj.smartdashboard.SmartDashboard;
+import edu.wpi.first.wpilibj.util.Color8Bit;
+import edu.wpi.first.wpilibj2.command.SubsystemBase;
+
+public class Elevador extends SubsystemBase {
+  // IDs dos motores
+  private static final int MASTER_ID = 7;
+  private static final int SLAVE_ID = 6;
+
+  // Constantes físicas
+  private static final double GEAR_RATIO = 10.0;
+  private static final double MASS_KG = 3.0;
+  private static final double DRUM_RADIUS = 0.03;
+  private static final double MIN_HEIGHT = 0.0;
+  private static final double MAX_HEIGHT = 2.0;
+
+  // Motores
+  private final SparkMax master = new SparkMax(MASTER_ID, MotorType.kBrushless);
+  private final SparkMax slave = new SparkMax(SLAVE_ID, MotorType.kBrushless);
+
+  // Simula o elevador 
+  private final ElevatorSim elevatorSim = new ElevatorSim(
+      DCMotor.getNEO(2),
+      GEAR_RATIO,
+      MASS_KG,
+      DRUM_RADIUS,
+      MIN_HEIGHT,
+      MAX_HEIGHT,
+      true,
+      0.0
+  );
+
+  // Visualização na smart dashboard
+  private final Mechanism2d mecanismo = new Mechanism2d(60, 60);
+  private final MechanismRoot2d base = mecanismo.getRoot("Base", 30, 5);
+  private final MechanismLigament2d estrutura = new MechanismLigament2d("Estrutura", 10, 90);
+  private final MechanismLigament2d carro = new MechanismLigament2d("Carro", 10, 0);
+
+  public Elevador() {
+    SparkMaxConfig config = new SparkMaxConfig();
+    config.idleMode(IdleMode.kBrake);
+    config.inverted(false);
+    master.configure(config, ResetMode.kNoResetSafeParameters, PersistMode.kPersistParameters);
+    slave.configure(config, ResetMode.kNoResetSafeParameters, PersistMode.kPersistParameters);
+
+    // junta a estruta do elevador, sendo "estrutura" a parte movel e "carro" o outtake
+    base.append(estrutura);
+    estrutura.append(carro);
+
+    estrutura.setColor(new Color8Bit(255, 255,255 )); //Branco
+    carro.setColor(new Color8Bit(255, 0, 0));       // vermelho
+    estrutura.setLineWeight(8);
+    carro.setLineWeight(10);
+
+    SmartDashboard.putData("Elevador Simulado", mecanismo);
+  }
+
+  //tensão aplicada
+  private double appliedVoltage = 0;
+
+  public void run(double speed) {
+      appliedVoltage = speed * RobotController.getBatteryVoltage();
+      master.set(speed);
+      slave.set(-speed);
+  }
+  
+  @Override
+  public void simulationPeriodic() {
+      elevatorSim.setInput(-appliedVoltage);
+      elevatorSim.update(0.02);
+  
+      double altura = getAltura();
+      //altura maxima do elevador
+      if(altura < MAX_HEIGHT) {
+      //aumenta ou diminui o tamanho do elevador
+      estrutura.setLength(10 + altura * 15);
+      }
+  }
+  
+
+  //Retorna altura atual 
+  public double getAltura() {
+    return elevatorSim.getPositionMeters();
+  }
+}
