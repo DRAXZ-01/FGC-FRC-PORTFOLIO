@@ -1,0 +1,236 @@
+package frc.robot.subsystems.drivetrain;
+
+import org.littletonrobotics.junction.AutoLog;
+import org.littletonrobotics.junction.Logger;
+
+import com.revrobotics.RelativeEncoder;
+import com.revrobotics.spark.SparkMax;
+import static edu.wpi.first.units.Units.*;
+
+import java.util.function.DoubleSupplier;
+import com.studica.frc.AHRS;
+import com.studica.frc.AHRS.NavXComType;
+
+import edu.wpi.first.math.Pair;
+import edu.wpi.first.math.controller.PIDController;
+import edu.wpi.first.math.estimator.DifferentialDrivePoseEstimator;
+import edu.wpi.first.math.geometry.Pose2d;
+import edu.wpi.first.math.geometry.Rotation2d;
+import edu.wpi.first.math.kinematics.DifferentialDriveKinematics;
+import edu.wpi.first.math.system.plant.DCMotor;
+import edu.wpi.first.math.util.Units;
+import edu.wpi.first.units.measure.Distance;
+import edu.wpi.first.wpilibj.drive.DifferentialDrive;
+import edu.wpi.first.wpilibj.smartdashboard.Field2d;
+import edu.wpi.first.wpilibj.smartdashboard.SmartDashboard;
+import edu.wpi.first.wpilibj2.command.Command;
+import edu.wpi.first.wpilibj2.command.SubsystemBase;
+import frc.robot.subsystems.vision.Vision;
+import yams.motorcontrollers.SmartMotorController;
+import yams.motorcontrollers.SmartMotorControllerConfig;
+import yams.motorcontrollers.SmartMotorControllerConfig.ControlMode;
+import yams.motorcontrollers.SmartMotorControllerConfig.MotorMode;
+import yams.motorcontrollers.SmartMotorControllerConfig.TelemetryVerbosity;
+import yams.motorcontrollers.local.SparkWrapper;
+
+
+public class DriveTrain extends SubsystemBase {
+    // Configurações mecânicas
+    private final double GEARING = 4.67; // Redução da caixa de transmissão
+    private final Distance WHEEL_DIAMETER = Meters.of(Units.inchesToMeters(4)); // Diâmetro da roda
+    
+    // Classe interna para Logging (AdvantageKit) - Armazena dados de hardware para replay
+    @AutoLog
+    public static class DriveTrainInputs {
+        public double leftDriveSpeedRadPerSec = 0.0;
+        public double leftDrivePositionRad = 0.0;
+        public double leftDriveAppliedVolts = 0.0;
+        public double leftDriveCurrentAmps = 0.0;
+
+        public double rightDriveSpeedRadPerSec = 0.0;
+        public double rightDrivePositionRad = 0.0;
+        public double rightDriveAppliedVolts = 0.0;
+        public double rightDriveCurrentAmps = 0.0;
+    }
+
+    private final DriveTrainInputsAutoLogged driveTrainInputs = new DriveTrainInputsAutoLogged();
+
+    // Motores e Controles (Abstração YAMS)
+    private final SmartMotorController leftMotorController;
+    private final SmartMotorController rightMotorController;
+    private final DifferentialDrive diffDrive;
+
+    // Hardware (SparkMax, Encoders e Giroscópio)
+    private final SparkMax leftMaster;
+    private final SparkMax rightMaster;
+    private final SparkMax leftSlave;
+    private final SparkMax rightSlave;
+
+    private final RelativeEncoder leftEncoder;
+    private final RelativeEncoder rightEncoder;
+    private final AHRS gyro = new AHRS(NavXComType.kMXP_SPI); // NavX 
+    
+    // Matemática de Odometria e Cinemática
+    private final DifferentialDriveKinematics kinematics = new DifferentialDriveKinematics(0.6); // 0.6m entre as rodas
+    private final DifferentialDrivePoseEstimator odometry;
+    private final Field2d field = new Field2d(); // Representação visual no Glass/Shuffleboard
+
+    private final Vision vision = new Vision();
+    private double currentSpeed = 0; // Usado para suavização (lerp)
+
+    // Controlador PID para giro automático
+    private final PIDController rotationController = new PIDController(0.01, 0, 0);
+
+    public DriveTrain() {
+        // Configuração do PID de rotação
+        rotationController.setTolerance(0.5);
+        rotationController.enableContinuousInput(-180, 180);
+
+        // Inicialização dos motores SparkMax
+        leftMaster = new SparkMax(2, SparkMax.MotorType.kBrushless);
+        rightMaster = new SparkMax(1, SparkMax.MotorType.kBrushless);
+        leftSlave = new SparkMax(3, SparkMax.MotorType.kBrushless);
+        rightSlave = new SparkMax(4, SparkMax.MotorType.kBrushless);
+
+        // Define os encoders 
+        leftEncoder = rightMaster.getEncoder();
+        rightEncoder = leftMaster.getEncoder();
+
+        // Configuração do motor Esquerdo (SmartMotorController - YAMS)
+        SmartMotorControllerConfig leftMotorConfig = new SmartMotorControllerConfig(this)
+                .withControlMode(ControlMode.CLOSED_LOOP)
+                .withGearing(GEARING)
+                .withSupplyCurrentLimit(Amps.of(60))
+                .withIdleMode(MotorMode.BRAKE)
+                .withMotorInverted(false)
+                .withWheelDiameter(WHEEL_DIAMETER)
+                .withTelemetry("LeftMotorMain", TelemetryVerbosity.LOW)
+                .withFollowers(Pair.of(leftSlave, false));
+
+        // Configuração do motor Direito (SmartMotorController - YAMS)
+        SmartMotorControllerConfig rightMotorConfig = new SmartMotorControllerConfig(this)
+                .withControlMode(ControlMode.CLOSED_LOOP)
+                .withGearing(GEARING)
+                .withSupplyCurrentLimit(Amps.of(60))
+                .withIdleMode(MotorMode.BRAKE)
+                .withMotorInverted(true) // Inverte o lado direito para o robô andar para frente
+                .withWheelDiameter(WHEEL_DIAMETER)
+                .withTelemetry("RightMotorMain", TelemetryVerbosity.LOW)
+                .withFollowers(Pair.of(rightSlave, false));
+
+        // Wrappers para controle avançado
+        leftMotorController = new SparkWrapper(leftMaster, DCMotor.getNEO(2), leftMotorConfig);
+        rightMotorController = new SparkWrapper(rightMaster, DCMotor.getNEO(2), rightMotorConfig);
+
+        // Objeto de controle de tração diferencial
+        diffDrive = new DifferentialDrive(
+                (output) -> leftMotorController.setVoltage(Volts.of(output * 8)),
+                (output) -> rightMotorController.setVoltage(Volts.of(output * 8)));
+        
+        diffDrive.setSafetyEnabled(false); 
+
+        // Inicializa o estimador de pose (posição no campo)
+        odometry = new DifferentialDrivePoseEstimator(kinematics, getRotation(), 0, 0, new Pose2d());
+
+        resetGyro();
+        resetEncoders();
+
+        SmartDashboard.putData("PID Controller", rotationController);
+    }
+
+    /** Interpolação linear para suavizar a aceleração do robô */
+    private double lerp(double a, double b, double t) {
+        return a + (b - a) * t;
+    }
+
+    /** Comando padrão de pilotagem (Arcade Drive) com suavização */
+    public Command drive(DoubleSupplier speed, DoubleSupplier rotationRate) {
+        return this.run(() -> {
+            this.currentSpeed = lerp(this.currentSpeed, speed.getAsDouble(), 0.05); // Suaviza em 5% por ciclo
+            diffDrive.arcadeDrive(this.currentSpeed, rotationRate.getAsDouble());
+        });
+    }
+
+    /** Aplica o cálculo do PID para girar o robô no próprio eixo */
+    public void autoRotate() {
+        double speed = rotationController.calculate(getRotation().getDegrees());
+        diffDrive.tankDrive(speed, -speed);
+    }
+
+    /** Comando para alinhar em um ângulo específico com timeout de 2 segundos */
+    public Command autoAlignCommand(double angle) {
+        rotationController.setSetpoint(angle);
+        resetGyro();
+        return this.run(() -> {
+            double speed = rotationController.calculate(getRotation().getDegrees());
+            diffDrive.tankDrive(speed, -speed);
+        }).withTimeout(2).until(rotationController::atSetpoint);
+    }
+
+    /** Define o alvo do giro automático baseado na rotação atual */
+    public void setSetpoint(double targetAngle) {
+        rotationController.setSetpoint(getRotation().getDegrees() + targetAngle);
+    }
+
+    /** Verifica se o robô chegou no ângulo desejado */
+    public boolean atTargetAngle() {
+        return rotationController.atSetpoint();
+    }
+
+    /** Coleta os dados de hardware e salva no objeto de inputs do AdvantageKit */
+    public void updateDriveInputs() {
+        driveTrainInputs.leftDrivePositionRad = leftMotorController.getMechanismPosition().in(Radians);
+        driveTrainInputs.rightDrivePositionRad = rightMotorController.getMechanismPosition().in(Radians);
+        driveTrainInputs.leftDriveSpeedRadPerSec = leftMotorController.getMechanismVelocity().in(RadiansPerSecond);
+        driveTrainInputs.rightDriveSpeedRadPerSec = rightMotorController.getMechanismVelocity().in(RadiansPerSecond);
+        driveTrainInputs.leftDriveAppliedVolts = leftMotorController.getVoltage().in(Volts);
+        driveTrainInputs.rightDriveAppliedVolts = rightMotorController.getVoltage().in(Volts);
+        driveTrainInputs.leftDriveCurrentAmps = leftMotorController.getStatorCurrent().in(Amps);
+        driveTrainInputs.rightDriveCurrentAmps = rightMotorController.getStatorCurrent().in(Amps);
+    }
+
+    // Métodos auxiliares de sensores
+    public void resetGyro() { gyro.reset(); }
+    public void resetEncoders() { leftEncoder.setPosition(0); rightEncoder.setPosition(0); }
+    public Rotation2d getRotation() { return gyro.getRotation2d(); }
+    public double getLeftDistance() { return leftMotorController.getMeasurementPosition().in(Meter); }
+    public double getRightDistance() { return rightMotorController.getMeasurementPosition().in(Meter); }
+    public Pose2d getPose() { return field.getRobotPose(); }
+
+    /** Comando para andar por um tempo determinado em linha reta */
+    public Command andarTime(double time, double percent){
+        return this.run(()-> diffDrive.arcadeDrive(percent, 0))
+                   .withTimeout(time)
+                   .finallyDo(()-> diffDrive.arcadeDrive(0, 0));
+    }
+
+    /** Ciclo periódico do subsistema (roda a cada 20ms) */
+    @Override
+    public void periodic() {
+        // Atualiza telemetria dos motores (YAMS)
+        leftMotorController.updateTelemetry();
+        rightMotorController.updateTelemetry();
+        
+        // Atualiza a posição baseada nos encoders e giro
+        odometry.update(getRotation(), -getLeftDistance(), -getRightDistance());
+        
+        // Se a visão detectar uma AprilTag, corrige a posição da odometria (Sensor Fusion)
+        vision.getPoseEst().ifPresent((p) -> odometry.addVisionMeasurement(p.estimatedPose.toPose2d(), p.timestampSeconds));
+        
+        // Atualiza o desenho do robô no campo virtual
+        field.setRobotPose(odometry.getEstimatedPosition());
+        
+        // Logging e Telemetria
+        updateDriveInputs();
+        Logger.processInputs("DriveTrain", driveTrainInputs);
+        Logger.recordOutput("RobotPosition", field.getRobotPose());
+    }
+    
+    /** Simulação: Atualiza o comportamento físico do robô no computador sem hardware real */
+    public void simulationPeriodic() {
+        leftMotorController.simIterate();
+        rightMotorController.simIterate();
+        updateDriveInputs();
+        Logger.processInputs("DriveTrain", driveTrainInputs);
+    }
+}

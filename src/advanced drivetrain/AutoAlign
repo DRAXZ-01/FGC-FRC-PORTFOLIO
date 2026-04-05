@@ -1,0 +1,94 @@
+// Copyright (c) FIRST and other WPILib contributors.
+// Open Source Software; you can modify and/or share it under the terms of
+// the WPILib BSD license file in the root directory of this project.
+
+package frc.robot.subsystems.drivetrain;
+
+import edu.wpi.first.math.geometry.Pose2d;
+import edu.wpi.first.math.geometry.Rotation2d;
+import edu.wpi.first.math.util.Units;
+import edu.wpi.first.wpilibj.DriverStation;
+import edu.wpi.first.wpilibj.DriverStation.Alliance;
+import edu.wpi.first.wpilibj.Timer;
+import edu.wpi.first.wpilibj.smartdashboard.SmartDashboard;
+import edu.wpi.first.wpilibj2.command.Command;
+
+/**
+ * Comando para alinhar o robô automaticamente em direção ao alvo (Hub) central.
+ * Ele calcula o ângulo necessário baseado na posição atual (Odometria) e na posição do alvo.
+ */
+public class AutoAlign extends Command {
+    private final DriveTrain driveTrain;
+    private final Timer timer = new Timer();
+    
+    // Coordenadas fixas do alvo (Hub) no campo para cada aliança (Red e Blue)
+    private final Pose2d redHubPose = new Pose2d(11.915, 4.035, new Rotation2d(0));
+    private final Pose2d blueHubPose = new Pose2d(4.622, 4.035, new Rotation2d(0));
+    private Pose2d hubPose;
+    
+    private double targetAngle;
+    private double currentAngle;
+
+    /**
+     * @param driveTrain O subsistema de tração que será controlado.
+     */
+    public AutoAlign(AdvancedDrivetrain driveTrain) {
+        this.driveTrain = driveTrain;
+        // Declara que este comando utiliza o DriveTrain, impedindo que outros comandos o usem simultaneamente
+        addRequirements(driveTrain);
+    }
+
+    // Chamado quando o comando é iniciado
+    @Override
+    public void initialize() {
+        timer.restart();
+        
+        // Detecta automaticamente a cor da aliança (Red por padrão se não detectar)
+        // Isso garante que o robô mire no alvo certo, não importa de que lado do campo comece
+        Alliance alliance = DriverStation.getAlliance().orElse(Alliance.Red);
+        hubPose = (alliance == Alliance.Blue) ? blueHubPose : redHubPose;
+
+        // Calcula a diferença de distância nos eixos X e Y entre o robô e o alvo
+        double x = hubPose.getX() - driveTrain.getPose().getX();
+        double y = hubPose.getY() - driveTrain.getPose().getY();
+        
+        // Atan2 retorna o ângulo em radianos para atingir o ponto (x, y). 
+        // Em seguida, convertemos para graus.
+        targetAngle = Units.radiansToDegrees(Math.atan2(y, x));
+
+        // Pega a rotação atual do robô vinda da odometria/giroscópio
+        currentAngle = driveTrain.getPose().getRotation().getDegrees();
+        
+        // Calcula o erro (o quanto falta girar) e envia para o PID do Drivetrain
+        double error = targetAngle - currentAngle;
+        SmartDashboard.putNumber("Angulo setado", error);
+        
+        // Configura o Setpoint no controlador PID do subsistema
+        driveTrain.setSetpoint(error);
+    }
+
+    // Chamado repetidamente enquanto o comando está ativo
+    @Override
+    public void execute() {
+        // Atualiza o erro no painel de controle (Dashboard) para monitoramento
+        double error = targetAngle - currentAngle;
+        SmartDashboard.putNumber("Angulo setado", error);
+        
+        // Executa a rotação automática usando o controlador PID configurado no Drivetrain
+        driveTrain.autoRotate();
+    }
+
+    // Chamado quando isFinished retorna true ou o comando é cancelado
+    @Override
+    public void end(boolean interrupted) {
+        timer.stop();
+        // Comando de segurança: força o robô a parar ou aplicar uma resistência mínima ao finalizar
+        driveTrain.andarTime(0.1, 0); 
+    }
+
+    // O comando termina quando o PID do Drivetrain informa que atingiu o ângulo alvo (dentro da tolerância)
+    @Override
+    public boolean isFinished() {
+        return driveTrain.atTargetAngle();
+    }
+}

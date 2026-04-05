@@ -38,7 +38,24 @@ A proposta é tornar o comportamento do robô mais previsível e consistente dur
 ### Simulação
 - Simulação de drivetrain com WPILib  
 - Simulação de elevador baseada em modelo físico  
-- Validação de comportamento sem necessidade de hardware  
+- Validação de comportamento sem necessidade de hardware
+
+### AutoAlign
+- Cálculo dinâmico do ângulo até o alvo com base na pose do robô  
+- Uso de `atan2` para determinar a direção correta independente da posição no campo  
+- Controle de rotação com PID para alinhamento automático  
+
+### Telemetria e Debug (Logger)
+- Uso de logging estruturado para monitorar:
+  - posição do robô  
+  - velocidade das rodas  
+  - tensão aplicada nos motores  
+- Permitiu identificar inconsistências no comportamento do drivetrain durante testes  
+
+### Arquitetura de Motores (YAMS)
+- Abstração dos controladores de motor para simplificar a criação de subsistemas  
+- Padronização de configuração (corrente, inversão, gearing, etc.)  
+- Facilita manutenção e reaproveitamento de código entre diferentes mecanismos  
 
 
 ##  Resultados
